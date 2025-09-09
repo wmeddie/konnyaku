@@ -77,11 +77,16 @@ sequenceDiagram
     participant React
     participant Tauri
     participant LlamaModel
+    participant HuggingFace
     
     User->>React: Enter text
     User->>React: Select language direction
-    User->>React: Click translate
+    User->>React: Click translate button
     React->>Tauri: invoke('translate', {text, direction})
+    alt Model not downloaded
+        Tauri->>HuggingFace: Download model using hf flag
+        HuggingFace-->>Tauri: Model downloaded
+    end
     Tauri->>LlamaModel: Load model (if not loaded)
     Tauri->>LlamaModel: Set system prompt based on direction
     Tauri->>LlamaModel: Generate translation
@@ -156,9 +161,11 @@ konnyaku/
 ## Technical Considerations
 
 ### Model Management
-- The GGUF model file should be downloaded and bundled with the application
-- Model loading should happen on application startup or first translation request
+- The GGUF model file will be downloaded from HuggingFace on first use using the `hf` flag
+- Model download respects the model's license requirements
+- Model loading happens on first translation request
 - Keep model in memory for quick subsequent translations
+- Cache downloaded model locally to avoid re-downloading
 
 ### Error Handling
 - Handle model loading failures gracefully
@@ -173,9 +180,11 @@ konnyaku/
 - Monitor memory usage
 
 ### User Experience
-- Provide immediate visual feedback
+- Manual translation triggered by clicking "Translate" button
+- Provide immediate visual feedback on button click
 - Show loading indicators during translation
 - Enable keyboard shortcuts (Cmd/Ctrl+Enter to translate)
+- Clear visual distinction between source and translated text
 - Auto-detect language (future enhancement)
 
 ## Next Steps
