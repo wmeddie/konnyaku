@@ -7,6 +7,10 @@ A lightweight, privacy-focused Japanese-English translation desktop application 
 ![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)
 ![Node](https://img.shields.io/badge/node-18%2B-green)
 
+## Looks
+
+<img width="1012" height="912" alt="image" src="https://github.com/user-attachments/assets/17dd4c58-c9e8-4b1e-90c4-eee2e21bc14a" />
+
 ## Features
 
 - 🔐 **100% Private**: All translations happen locally on your device
