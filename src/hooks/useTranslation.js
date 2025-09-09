@@ -20,8 +20,10 @@ export function useTranslation() {
   const checkModelStatus = useCallback(async () => {
     try {
       const status = await invoke('get_model_status');
-      setModelStatus(prev => ({ ...prev, isLoaded: status }));
-      return status;
+      // Backend returns { loaded: bool }, convert to isLoaded for frontend
+      const isLoaded = status?.loaded || false;
+      setModelStatus(prev => ({ ...prev, isLoaded }));
+      return isLoaded;
     } catch (err) {
       console.error('Failed to check model status:', err);
       return false;
@@ -92,12 +94,23 @@ export function useTranslation() {
       }
 
       // Perform translation
-      const result = await invoke('translate', { 
-        text: text.trim(), 
-        direction 
+      // Convert direction format from en_to_ja to en-ja for backend compatibility
+      const backendDirection = direction.replace('_to_', '-');
+      const result = await invoke('translate', {
+        request: {
+          text: text.trim(),
+          direction: backendDirection
+        }
       });
       
-      return result;
+      // Handle the response - check if successful
+      if (result?.success && result?.translation) {
+        return result.translation;
+      } else if (result?.error) {
+        throw new Error(result.error);
+      } else {
+        return '';
+      }
     } catch (err) {
       const errorMessage = err?.message || err?.toString() || 'Translation failed';
       setError(errorMessage);

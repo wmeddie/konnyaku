@@ -82,20 +82,135 @@ impl TranslationService {
         }
         
         println!("Downloading model from HuggingFace...");
+        println!("Model: {}/{}", MODEL_REPO, MODEL_FILE);
         
-        // Initialize HuggingFace API
-        let api = Api::new()?;
+        // Ensure the parent directory exists
+        if let Some(parent) = self.model_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .context("Failed to create model directory")?;
+        }
+        
+        // Try direct download first as it's often faster
+        let direct_url = format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            MODEL_REPO, MODEL_FILE
+        );
+        
+        println!("Attempting direct download from: {}", direct_url);
+        
+        match self.download_file_direct(&direct_url).await {
+            Ok(()) => {
+                println!("Model downloaded successfully via direct download");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Direct download failed: {}, trying HuggingFace API...", e);
+            }
+        }
+        
+        // Fallback to HuggingFace API
+        let download_timeout = std::time::Duration::from_secs(300);
+        
+        let api = Api::new()
+            .context("Failed to create HuggingFace API")?;
         let repo = api.model(MODEL_REPO.to_string());
         
-        // Download the model file
-        let model_file = repo.get(MODEL_FILE).await?;
+        let download_future = async {
+            println!("Starting HuggingFace API download...");
+            let model_file = repo.get(MODEL_FILE).await
+                .context("Failed to download model from HuggingFace")?;
+            
+            println!("Download complete, copying to cache...");
+            
+            // Copy to cache location
+            tokio::fs::copy(&model_file, &self.model_path)
+                .await
+                .context("Failed to copy model to cache")?;
+            
+            Ok::<(), anyhow::Error>(())
+        };
         
-        // Copy to cache location
-        tokio::fs::copy(&model_file, &self.model_path)
+        match tokio::time::timeout(download_timeout, download_future).await {
+            Ok(Ok(())) => {
+                println!("Model downloaded successfully to: {:?}", self.model_path);
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                eprintln!("HuggingFace API download failed: {}", e);
+                eprintln!("\nPlease try downloading the model manually:");
+                eprintln!("1. Download from: {}", direct_url);
+                eprintln!("2. Save to: {:?}", self.model_path);
+                Err(e)
+            }
+            Err(_) => {
+                let err = anyhow::anyhow!("Model download timed out after 5 minutes");
+                eprintln!("{}", err);
+                eprintln!("\nPlease try downloading the model manually:");
+                eprintln!("1. Download from: {}", direct_url);
+                eprintln!("2. Save to: {:?}", self.model_path);
+                Err(err)
+            }
+        }
+    }
+    
+    /// Direct download using reqwest (simpler than HuggingFace API)
+    async fn download_file_direct(&self, url: &str) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()?;
+        
+        let response = client
+            .get(url)
+            .send()
             .await
-            .context("Failed to copy model to cache")?;
+            .context("Failed to start download")?;
         
-        println!("Model downloaded successfully to: {:?}", self.model_path);
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
+        }
+        
+        let total_size = response
+            .content_length()
+            .unwrap_or(0);
+        
+        println!("Download size: {} MB", total_size / 1_048_576);
+        
+        let mut file = tokio::fs::File::create(&self.model_path)
+            .await
+            .context("Failed to create file")?;
+        
+        let mut downloaded = 0u64;
+        let mut stream = response.bytes_stream();
+        
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("Error while downloading chunk")?;
+            file.write_all(&chunk)
+                .await
+                .context("Failed to write to file")?;
+            
+            downloaded += chunk.len() as u64;
+            
+            // Print progress every 10MB
+            if downloaded % (10 * 1_048_576) == 0 || downloaded == total_size {
+                let progress = if total_size > 0 {
+                    (downloaded as f64 / total_size as f64 * 100.0) as u32
+                } else {
+                    0
+                };
+                println!("Download progress: {} MB / {} MB ({}%)",
+                         downloaded / 1_048_576,
+                         total_size / 1_048_576,
+                         progress);
+            }
+        }
+        
+        file.flush().await?;
+        println!("Download complete!");
+        
         Ok(())
     }
     
