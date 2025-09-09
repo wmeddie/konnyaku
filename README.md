@@ -1,4 +1,4 @@
-# Konnyaku 🍡
+# Konnyaku 🍢
 
 A lightweight, privacy-focused Japanese-English translation desktop application powered by local AI. Built with Tauri, React, and the LiquidAI LFM2-350M-ENJP-MT model running entirely on your device.
 
