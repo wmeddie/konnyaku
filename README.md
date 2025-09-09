@@ -9,7 +9,7 @@ A lightweight, privacy-focused Japanese-English translation desktop application 
 
 ## Looks
 
-<img width="1012" height="912" alt="image" src="https://github.com/user-attachments/assets/17dd4c58-c9e8-4b1e-90c4-eee2e21bc14a" />
+<img width="1012" height="912" alt="image" src="https://github.com/user-attachments/assets/da96d718-a787-4719-8679-71eab08aa6e3" />
 
 ## Features
 
