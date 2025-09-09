@@ -2148,6 +2148,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "directories",
+ "encoding_rs",
  "hf-hub",
  "llama-cpp-2",
  "serde",

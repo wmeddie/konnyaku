@@ -23,9 +23,11 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Translation model dependencies
-llama-cpp-2 = { version = "0.1", features = ["metal"] }
+# Disable OpenMP to avoid linking issues on macOS
+llama-cpp-2 = { version = "0.1", default-features = false, features = ["metal"] }
 tokio = { version = "1", features = ["full"] }
 hf-hub = { version = "0.3", features = ["tokio"] }
 directories = "5.0"
 anyhow = "1.0"
+encoding_rs = "0.8"
 

@@ -1,7 +1,14 @@
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use hf_hub::api::tokio::Api;
+use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::llama_backend::LlamaBackend;
+use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::model::{AddBos, LlamaModel, Special};
+use llama_cpp_2::sampling::LlamaSampler;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -11,6 +18,8 @@ const MODEL_REPO: &str = "LiquidAI/LFM2-350M-ENJP-MT-GGUF";
 const MODEL_FILE: &str = "lfm2-350m-enjp-mt-q4_k_m.gguf";
 const SYSTEM_PROMPT_EN_TO_JA: &str = "Translate to Japanese.";
 const SYSTEM_PROMPT_JA_TO_EN: &str = "Translate to English.";
+const MAX_TOKENS: i32 = 512;
+const CONTEXT_SIZE: u32 = 4096;  // Sufficient for translation tasks, model supports up to 128000
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TranslationDirection {
@@ -18,9 +27,10 @@ pub enum TranslationDirection {
     JapaneseToEnglish,
 }
 
-// Simplified model state - we'll handle the actual llama-cpp-2 integration later
+// Model state holding the loaded model and context
 pub struct ModelState {
-    model_path: PathBuf,
+    backend: LlamaBackend,
+    model: Option<LlamaModel>,
     is_loaded: bool,
 }
 
@@ -36,8 +46,13 @@ impl TranslationService {
         let cache_dir = Self::get_cache_dir()?;
         let model_path = cache_dir.join(MODEL_FILE);
         
+        // Initialize the LlamaBackend
+        let backend = LlamaBackend::init()
+            .context("Failed to initialize LlamaBackend")?;
+        
         let model_state = ModelState {
-            model_path: model_path.clone(),
+            backend,
+            model: None,
             is_loaded: false,
         };
         
@@ -93,15 +108,28 @@ impl TranslationService {
         }
         
         // Ensure model is downloaded
+        drop(state); // Release lock temporarily
         self.ensure_model_downloaded().await?;
+        state = self.model_state.lock().await; // Re-acquire lock
         
         println!("Loading model from: {:?}", self.model_path);
         
-        // For now, we'll just mark it as loaded
-        // The actual llama-cpp-2 integration will be added once we understand the API better
+        // Configure model parameters (use Metal for GPU acceleration on macOS)
+        let model_params = LlamaModelParams::default()
+            .with_n_gpu_layers(1000); // Offload all layers to GPU if available
+        
+        // Load the model
+        let model = LlamaModel::load_from_file(
+            &state.backend,
+            &self.model_path,
+            &model_params,
+        )
+        .context("Failed to load model")?;
+        
+        state.model = Some(model);
         state.is_loaded = true;
         
-        println!("Model loaded successfully (placeholder)");
+        println!("Model loaded successfully");
         Ok(())
     }
     
@@ -114,28 +142,100 @@ impl TranslationService {
         // Ensure model is loaded
         self.ensure_model_loaded().await?;
         
+        let state = self.model_state.lock().await;
+        let model = state.model.as_ref()
+            .context("Model not loaded")?;
+        
         // Get the appropriate system prompt
         let system_prompt = match direction {
             TranslationDirection::EnglishToJapanese => SYSTEM_PROMPT_EN_TO_JA,
             TranslationDirection::JapaneseToEnglish => SYSTEM_PROMPT_JA_TO_EN,
         };
         
-        // Format the full prompt
-        let full_prompt = format!("{}\n\n{}", system_prompt, text);
-        
-        // For now, return a placeholder translation
-        // The actual translation logic will be implemented once we have the correct llama-cpp-2 API usage
-        let translation = match direction {
-            TranslationDirection::EnglishToJapanese => {
-                format!("[JP Translation of: {}]", text)
-            }
-            TranslationDirection::JapaneseToEnglish => {
-                format!("[EN Translation of: {}]", text)
-            }
-        };
+        // Format the prompt for single-turn translation model
+        // The model expects: system prompt with "Translate to [Language]." followed by the text
+        let full_prompt = format!("{}\n{}", system_prompt, text);
         
         println!("Translating with prompt: {}", full_prompt);
-        println!("Placeholder translation: {}", translation);
+        
+        // Create context parameters
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(Some(NonZeroU32::new(CONTEXT_SIZE).unwrap()))
+            .with_n_threads(4); // Use 4 threads for CPU inference
+        
+        // Create a new context for this translation
+        let mut ctx = model
+            .new_context(&state.backend, ctx_params)
+            .context("Failed to create context")?;
+        
+        // Tokenize the prompt
+        let tokens_list = model
+            .str_to_token(&full_prompt, AddBos::Always)
+            .context("Failed to tokenize prompt")?;
+        
+        // Create a batch for processing
+        let mut batch = LlamaBatch::new(512, 1);
+        
+        // Add all prompt tokens to the batch
+        let last_index = (tokens_list.len() - 1) as i32;
+        for (i, token) in (0_i32..).zip(tokens_list.iter()) {
+            let is_last = i == last_index;
+            batch.add(*token, i, &[0], is_last)?;
+        }
+        
+        // Process the prompt
+        ctx.decode(&mut batch)
+            .context("Failed to decode prompt")?;
+        
+        // Initialize the decoder for UTF-8 output
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        
+        // Create a sampler for token generation
+        // Using greedy sampling for deterministic output (best for translation)
+        let mut sampler = LlamaSampler::greedy();
+        
+        // Generate the translation
+        let mut translation = String::new();
+        let mut n_cur = batch.n_tokens();
+        let max_new_tokens = MAX_TOKENS - tokens_list.len() as i32;
+        
+        for _ in 0..max_new_tokens {
+            // Sample the next token
+            let token = sampler.sample(&ctx, n_cur - 1);
+            sampler.accept(token);
+            
+            // Check for end of sequence
+            if model.is_eog_token(token) {
+                break;
+            }
+            
+            // Convert token to text
+            let output_bytes = model
+                .token_to_bytes(token, Special::Tokenize)
+                .context("Failed to convert token to bytes")?;
+            
+            // Decode bytes to string
+            let mut output_string = String::with_capacity(32);
+            let _decode_result = decoder.decode_to_string(&output_bytes, &mut output_string, false);
+            
+            // Add to translation
+            translation.push_str(&output_string);
+            
+            // Prepare for next token
+            batch.clear();
+            batch.add(token, n_cur, &[0], true)?;
+            
+            n_cur += 1;
+            
+            // Process the new token
+            ctx.decode(&mut batch)
+                .context("Failed to decode token")?;
+        }
+        
+        // Clean up the translation (remove any extra whitespace)
+        let translation = translation.trim().to_string();
+        
+        println!("Translation complete: {}", translation);
         
         Ok(translation)
     }
@@ -150,12 +250,11 @@ impl TranslationService {
 unsafe impl Send for TranslationService {}
 unsafe impl Sync for TranslationService {}
 
-// Note: The actual llama-cpp-2 integration has been simplified for now
-// to ensure the code compiles. The full implementation will require:
-// 1. Understanding the exact API of the llama-cpp-2 crate version we're using
-// 2. Handling the lifetime parameters correctly for LlamaContext
-// 3. Using the correct batch processing API
-// 4. Implementing proper token sampling
-//
-// This placeholder implementation allows the rest of the application to be built
-// while we work out the details of the llama-cpp-2 integration.
+// Implementation notes:
+// 1. Using LlamaBackend::init() to initialize the backend once
+// 2. Loading model with LlamaModel::load_from_file()
+// 3. Creating a new context for each translation to ensure clean state
+// 4. Using greedy sampling for deterministic translations
+// 5. Processing tokens in batches using LlamaBatch
+// 6. Properly handling UTF-8 decoding for Japanese text
+// 7. Using Metal acceleration on macOS when available
