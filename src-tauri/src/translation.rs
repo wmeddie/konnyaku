@@ -5,7 +5,7 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel, Special};
+use llama_cpp_2::model::{AddBos, LlamaModel, Special, LlamaChatMessage, LlamaChatTemplate};
 use llama_cpp_2::sampling::LlamaSampler;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 
 // Model configuration constants
 const MODEL_REPO: &str = "LiquidAI/LFM2-350M-ENJP-MT-GGUF";
-const MODEL_FILE: &str = "lfm2-350m-enjp-mt-q4_k_m.gguf";
+const MODEL_FILE: &str = "LFM2-350M-ENJP-MT-Q4_K_M.gguf";
 const SYSTEM_PROMPT_EN_TO_JA: &str = "Translate to Japanese.";
 const SYSTEM_PROMPT_JA_TO_EN: &str = "Translate to English.";
 const MAX_TOKENS: i32 = 512;
@@ -229,9 +229,9 @@ impl TranslationService {
         
         println!("Loading model from: {:?}", self.model_path);
         
-        // Configure model parameters (use Metal for GPU acceleration on macOS)
         let model_params = LlamaModelParams::default()
-            .with_n_gpu_layers(1000); // Offload all layers to GPU if available
+            .with_n_gpu_layers(0); // Offload no layers to GPU.
+            
         
         // Load the model
         let model = LlamaModel::load_from_file(
@@ -267,11 +267,28 @@ impl TranslationService {
             TranslationDirection::JapaneseToEnglish => SYSTEM_PROMPT_JA_TO_EN,
         };
         
-        // Format the prompt for single-turn translation model
-        // The model expects: system prompt with "Translate to [Language]." followed by the text
-        let full_prompt = format!("{}\n{}", system_prompt, text);
+        // Get the chat template from the model
+        let chat_template = model
+            .chat_template(None)  // None = use default template
+            .unwrap_or_else(|_| {
+                // Fallback to chatml if no template in model
+                LlamaChatTemplate::new("chatml")
+                    .expect("Failed to create chatml template")
+            });
         
-        println!("Translating with prompt: {}", full_prompt);
+        // Create chat messages
+        let chat = vec![
+            LlamaChatMessage::new("system".to_string(), system_prompt.to_string())
+                .context("Failed to create system message")?,
+            LlamaChatMessage::new("user".to_string(), text.to_string())
+                .context("Failed to create user message")?,
+        ];
+        
+        // Apply the chat template
+        let full_prompt = model
+            .apply_chat_template(&chat_template, &chat, true)
+            .context("Failed to apply chat template")?;
+        
         
         // Create context parameters
         let ctx_params = LlamaContextParams::default()
@@ -283,7 +300,8 @@ impl TranslationService {
             .new_context(&state.backend, ctx_params)
             .context("Failed to create context")?;
         
-        // Tokenize the prompt
+        // Tokenize the prompt - AddBos depends on model's expectation
+        // Try with AddBos::Always first as many models expect it
         let tokens_list = model
             .str_to_token(&full_prompt, AddBos::Always)
             .context("Failed to tokenize prompt")?;
@@ -292,6 +310,7 @@ impl TranslationService {
         let mut batch = LlamaBatch::new(512, 1);
         
         // Add all prompt tokens to the batch
+        // Only request logits for the last token
         let last_index = (tokens_list.len() - 1) as i32;
         for (i, token) in (0_i32..).zip(tokens_list.iter()) {
             let is_last = i == last_index;
@@ -302,6 +321,9 @@ impl TranslationService {
         ctx.decode(&mut batch)
             .context("Failed to decode prompt")?;
         
+        // Initialize generation position
+        let mut n_cur = batch.n_tokens();
+        
         // Initialize the decoder for UTF-8 output
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         
@@ -311,16 +333,16 @@ impl TranslationService {
         
         // Generate the translation
         let mut translation = String::new();
-        let mut n_cur = batch.n_tokens();
-        let max_new_tokens = MAX_TOKENS - tokens_list.len() as i32;
+        let n_len = n_cur + MAX_TOKENS;
         
-        for _ in 0..max_new_tokens {
+        while n_cur <= n_len {
             // Sample the next token
-            let token = sampler.sample(&ctx, n_cur - 1);
+            // Key: Use batch.n_tokens() - 1, not n_cur - 1!
+            let token = sampler.sample(&ctx, batch.n_tokens() - 1);
             sampler.accept(token);
             
-            // Check for end of sequence
-            if model.is_eog_token(token) {
+            // Check for end of stream
+            if token == model.token_eos() {
                 break;
             }
             
@@ -336,7 +358,7 @@ impl TranslationService {
             // Add to translation
             translation.push_str(&output_string);
             
-            // Prepare for next token
+            // Prepare for next iteration
             batch.clear();
             batch.add(token, n_cur, &[0], true)?;
             
@@ -344,13 +366,11 @@ impl TranslationService {
             
             // Process the new token
             ctx.decode(&mut batch)
-                .context("Failed to decode token")?;
+                .context("Failed to decode next token")?;
         }
         
         // Clean up the translation (remove any extra whitespace)
         let translation = translation.trim().to_string();
-        
-        println!("Translation complete: {}", translation);
         
         Ok(translation)
     }
