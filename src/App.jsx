@@ -58,7 +58,7 @@ function App() {
         <div className="header-content">
           <div className="logo-section">
             <h1 className="app-title">
-              <span className="logo-icon">🌐</span>
+              <span className="logo-icon">🍢</span>
               Konnyaku
             </h1>
             <p className="app-subtitle">
