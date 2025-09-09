@@ -213,8 +213,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/konnyaku/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/konnyaku/discussions)
+- **Issues**: [GitHub Issues](https://github.com/wmeddie/konnyaku/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/wmeddie/konnyaku/discussions)
 
 ---
 
